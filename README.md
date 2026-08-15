@@ -167,7 +167,7 @@ modifier(text)
 15. Select the `Library` tab on the left
 16. Delete all code within said tab
 17. DOWNLOAD the full Library code (hyperlink below) and open it in Notepad or Notepad ++
-- [Library code](./src/library.js)
+- [Library code](./src/Library.js)
 18. Copy the full code from the notepad, (Ctrl + A) -> (Ctrl + C) -> (Ctrl + V) is a shortcut, and paste into your empty `Library` tab
 19. Click the big yellow `SAVE` button in the top right corner
 
