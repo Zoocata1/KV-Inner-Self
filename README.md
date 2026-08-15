@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="https://github.com/Zoocata1/Master-Merged-Script/blob/main/assets/AI-Dungeon-image.png" width="800">
-</p>
-
 # INNER SELF FOR OPTIMIZED CONTEXT
 
 This Github Repo serves as the goto for the amazing Inner Self script, Created by LewdLeah, on AI Dungeons that has been modified to run on models using KV caching.
