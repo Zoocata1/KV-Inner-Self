@@ -10,9 +10,15 @@ This Github Repo serves as the goto for the amazing Inner Self script, Created b
 <details>
 <summary><b>(click to expand)</b></summary>
 
+### 1.0.1
+
+- Updated Inner Self with a few QoL compression and bug fixes
+- Updated the NGO and Inner Self version with the appropriate fixes
+- Add the new SAE and Inner Self script for testing and feedback 
+
 ### 1.0.0
 
-Current Full Release
+- Current Full Release
 
 </details>
 
