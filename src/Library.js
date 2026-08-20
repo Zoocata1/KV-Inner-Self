@@ -1,4 +1,6 @@
 // Your "Library" tab should look like this
+// Forked version of Inner Self for Optimized Content in AID, graciously allowed by LewdLeah
+// Forked by Zoocata. Please see the github for updates and combinational scripts.
 
 /**
  * Main control panel for scenario creator convenience
@@ -24,7 +26,7 @@ globalThis.MainSettings = (class MainSettings {
     // (write a comma separated list of names inside the "" like so: "Leah, Lily, Lydia")
     ,
     // Is Inner Self already enabled when the adventure begins?
-    IS_INNER_SELF_ENABLED_BY_DEFAULT: true
+    IS_INNER_SELF_ENABLED_BY_DEFAULT: false
     // (true or false)
     ,
     // Is the player character's first name known in advance? Ignore this setting if unsure
@@ -284,7 +286,7 @@ function InnerSelf(hook) {
     ,
     }; //——————————————————————————————————————————————————————————————————————————————
 
-    const version = "v1.0.2";
+    const version = "v1.0.2-KV.3";
     // Validate that all required AI Dungeon global properties exist
     // Without these, Inner Self literally cannot function
     if (
@@ -339,8 +341,6 @@ function InnerSelf(hook) {
         label: 0,
         // Hash of recent history to detect retry or erase + continue turns
         hash: "",
-        // Hash of the history state where FIFO last pruned a thought
-        fifoHash: "",
         // Total number of brain operations performed across all agents
         ops: 0,
         // Auto-Cards integration state
@@ -1055,33 +1055,34 @@ function InnerSelf(hook) {
      */
     const getPrevAction = () => history.findLast(a => !/^[\u200B-\u200D]*$/.test(a?.text ?? a?.rawText ?? ""));
     // ==================== CONTEXT HOOK ====================
-    // This is where (half) of the magic happens: Inner Self injects brains and tasks into context
-    // Infer the current lifecycle hook
+    // KV-cache-compatible context path: the incoming AID context is an immutable prefix.
     if ((hook === "context") || Number.isInteger(info.maxChars)) {
-        // Calculate the player's context limit with a small buffer
-        const limit = Math.max((Math.min(text.length, info.maxChars) - 10), 4500);
-        // Ensure stop variable exists (the AID script sandbox is silly)
+        const cacheBase = text;
+        const maxChars = Math.max(
+            1,
+            Number.isInteger(info.maxChars) ? info.maxChars : cacheBase.length
+        );
         globalThis.stop ??= false;
-        // Reset agent trigger for this turn
         IS.agent = "";
+
         /** @type {config} */
         const config = Config.get();
         if (config.pin) {
-            // Move config card to top of list if pinning is enabled
             const index = storyCards.indexOf(config.card);
             if (0 < index) {
                 storyCards.splice(index, 1);
                 storyCards.unshift(config.card);
             }
         }
-        const unzero = () => ((text = text.replace(/[\u200B-\u200D]+/g, "") || " "), (IS.encoding = ""));
-        // Handle Auto-Cards integration when enabled
+
+        // Tell the bundled Auto-Cards context path to use its KV-safe append-only mode.
+        IS.kv = deepMerge(IS.kv || {}, { version: 3 });
+        IS.AC.kvDeferred = false;
+
         if (config.auto && hasAutoCards()) {
             try {
                 if (!IS.AC.enabled) {
-                    // It's my first time enabling AC, please be gentle :3
                     const api = AutoCards().API;
-                    // Prevent AC from generating cards with reserved titles
                     api.setBannedTitles([
                         "Inner",
                         "Self",
@@ -1090,76 +1091,73 @@ function InnerSelf(hook) {
                         ...api.getBannedTitles(),
                     ]);
                 }
-                // Run AC's context branch
                 AutoCards(null);
                 IS.AC.event = false;
-                [text, stop] = AutoCards("context", text, stop);
+                const acResult = AutoCards("context", cacheBase, stop);
+                if (Array.isArray(acResult)) {
+                    const [acText, acStop] = acResult;
+                    if ((typeof acText === "string") && acText.startsWith(cacheBase)) {
+                        text = acText;
+                    } else {
+                        log("Inner Self KV: rejected a non-append-only Auto-Cards context mutation.");
+                        text = cacheBase;
+                        IS.AC.event = false;
+                        IS.AC.kvDeferred = true;
+                    }
+                    stop = (acStop === true);
+                } else {
+                    text = cacheBase;
+                    IS.AC.event = false;
+                    IS.AC.kvDeferred = true;
+                }
             } catch (error) {
-                log(error.message);
+                log("Inner Self KV Auto-Cards error:", error);
+                text = cacheBase;
+                IS.AC.event = false;
+                IS.AC.kvDeferred = true;
             }
-            IS.AC.enabled = true;
-            if (IS.AC.event || (stop === true)) {
-                // If AC triggered an event or stop, we're done here
-                config.allow ? unzero() : ((IS.encoding = ""), (text ||= " "));
+
+            // If AC could not fit a complete generation/compression prompt, do not
+            // delegate this turn's Output to AC. Its pending work remains for a later turn.
+            IS.AC.enabled = (IS.AC.kvDeferred !== true);
+
+            if ((IS.AC.event && IS.AC.enabled) || (stop === true)) {
+                if (!text.startsWith(cacheBase)) {
+                    text = cacheBase;
+                }
                 return;
             }
-        } else if (IS.AC.enabled) {
+        } else {
             IS.AC.enabled = false;
-            // AC was just disabled, clean up its cards ;)
-            for (let i = storyCards.length - 1; -1 < i; i--) {
-                const card = storyCards[i];
-                // Check if this is an AC-related card that should be removed
-                if (!([
-                    "Shared Library",
-                    "Input Modifier",
-                    "Context Modifier",
-                    "Output Modifier",
-                    "LSIv2 Guide",
-                    "State Display",
-                    "Console Log"
-                ].includes(card.title) && (card.title === card.keys)) && [{ key: "title", options: [
-                    "Configure \nAuto-Cards",
-                    "Edit to enable \nAuto-Cards"
-                ] }, { key: "keys", options: [
-                    "Edit the entry above to adjust your story card automation settings",
-                    "Edit the entry above to enable story card automation"
-                ] }].every(({ key, options }) => !options.includes(card[key]))) {
-                    continue;
-                } else if (typeof removeStoryCard === "function") {
-                    removeStoryCard(i);
-                } else {
-                    storyCards.splice(i, 1);
-                }
-            }
+            IS.AC.event = false;
+            IS.AC.kvDeferred = false;
+            text = cacheBase;
         }
+
+        const innerBase = text;
+        const suffixBudget = Math.max(0, maxChars - innerBase.length - 16);
+
         if (!config.allow) {
-            // Early exit if Inner Self is disabled
             IS.encoding = "";
-            text ||= " ";
+            text = innerBase || " ";
             return;
         }
-        /**
-         * Removes visual indicators from all story cards
-         * Called when no agent is triggered or Inner Self is disabled
-         * @returns {void}
-         */
+
         const deindicateAll = () => {
             for (const card of storyCards) {
                 deindicate(card);
             }
             return;
         };
+
         if (config.agents.length === 0) {
-            // No agents are configured
             deindicateAll();
-            unzero();
+            IS.encoding = "";
+            text = innerBase || " ";
             return;
         }
+
         // ==================== AGENT TRIGGER DETECTION ====================
-        // Scan config.distance actions back through history to find the most recent agent trigger
-        // Tie-break same-action name triggers based on RNG and their order-of-priority in config.agents
-        // Do it all without using ANY RegEx because I'm extra like that :3
-        // (this block is blazingly fast)
         const possibilities = [];
         for (
             let [i, remaining] = [history.length - 1, config.distance];
@@ -1168,397 +1166,116 @@ function InnerSelf(hook) {
         ) {
             const actionText = history[i]?.text ?? history[i]?.rawText;
             if ((typeof actionText !== "string") || (actionText.indexOf(">>>") !== -1)) {
-                // Skip invalid actions or Auto-Cards thingies
                 continue;
             }
             scan: {
-                // Check if this action has any meaningful content
                 for (let j = actionText.length - 1; -1 < j; j--) {
                     const c = actionText.charCodeAt(j);
                     if ((0x20 < c) && (c !== 0x200B) && (c !== 0x200C) && (c !== 0x200D)) {
-                        // Fast accept any non-whitespace + non-zero-width char
                         break scan;
                     }
                 }
-                // Byeee
                 continue;
             }
             remaining--;
-            // Lowercase for case-insensitive matching
             const lower = actionText.toLowerCase();
-            // Check each agent in priority order
             for (let [a, n] = [0, config.agents.length]; a < n; a++) {
                 const agentLower = config.agents[a].toLowerCase();
-                // Scan for all occurrences of agentLower in lower
                 for (
                     let p = lower.indexOf(agentLower);
                     (p !== -1);
                     p = lower.indexOf(agentLower, p + 1)
                 ) {
-                    // Ensure word boundaries (not a-z before or after)
                     if ([((0 < p) ? lower.charCodeAt(p - 1) : 0), (
                         ((p + agentLower.length) < lower.length)
                         ? lower.charCodeAt(p + agentLower.length) : 0
                     )].every(c => ((c < 97) || (122 < c)))) {
-                        // Found a valid trigger
                         possibilities.push(config.agents[a]);
                         break;
                     }
                 }
             }
         }
+
         if (possibilities.length === 0) {
-            // No agent triggered, clean up and exit
-            // Strip zero-width chars and end with a single space
-            text = `${text.replace(/\s*[\u200B-\u200D][\s\u200B-\u200D]*/g, "\n\n").trim()} `;
             deindicateAll();
-            // Do fancy standoff spacing leading ahead of the next output
             IS.encoding = "";
             IS.agent = " ";
-            text ||= " ";
+            text = innerBase || " ";
             return;
-        } else {
-            // Use RNG for tie-breaking name triggers with some priority bias
-            const n = possibilities.length;
-            // Sum of weights
-            const total = (n * (n + 1)) / 2;
-            for (let [i, r] = [0, Math.random() * total]; i < n; i++) {
-                r -= (n - i);
-                if (r < 0) {
-                    IS.agent = possibilities[i];
-                    break;
-                }
-            }
-        }
-        // Temporary markers used to reliably identify sections of the context for later calculations
-        const boundary = Object.freeze({
-            // Hardcoded AID context header
-            needle: "Recent Story:",
-            // Marks start of recent story
-            upper: "<|story|>",
-            // Marks end of Recent Story before later Optimized Context sections
-            end: "<|story-end|>",
-            // Marks start of task instructions
-            lower: "<|task|>"
-        });
-        /**
-         * Replaces a substring in text with a replacement string
-         * Expands to consume surrounding whitespace
-         * @param {string} substring - String to find and replace
-         * @param {string} replacement - String to replace with
-         * @param {Function} fallback - Called if substring not found
-         * @returns {void}
-         */
-        const setMarker = (substring = "", replacement = "", fallback = () => {}) => {
-            let start = text.indexOf(substring);
-            if (start === -1) {
-                // Do stuff
-                fallback();
-                return;
-            }
-            let end = start + substring.length;
-            // Expand left over whitespace
-            while ((0 < start) && (text.charCodeAt(start - 1) < 33)) {
-                start--;
-            }
-            // Expand right over whitespace
-            while ((end < text.length) && (text.charCodeAt(end) < 33)) {
-                end++;
-            }
-            text = `${text.slice(0, start)}${replacement}${text.slice(end)}`;
-            return;
-        };
-        // Replace "Recent Story:" with the upper boundary marker
-        setMarker(boundary.needle, boundary.upper, () => {
-            // No needle found, append marker to end
-            text = `${text.trimEnd()}${boundary.upper}`;
-            return;
-        });
-
-        // Optimized Context can place Memories and World Lore after Recent Story.
-        // Mark the real end so Inner Self never treats those sections as story history.
-        const upperBoundaryIndex = text.indexOf(boundary.upper);
-        if (upperBoundaryIndex !== -1) {
-            const storyContentStart = upperBoundaryIndex + boundary.upper.length;
-            const remainder = text.slice(storyContentStart);
-            const nextSection = remainder.search(
-                /\n[ \t]*(?:Memories|World Lore)[ \t]*:|\n[ \t]*\[[ \t]*Author's note[ \t]*:/i
-            );
-            const storyContentEnd = (
-                nextSection === -1
-                ? text.length
-                : storyContentStart + nextSection
-            );
-            text = (
-                text.slice(0, storyContentEnd)
-                + boundary.end
-                + text.slice(storyContentEnd)
-            );
         }
 
-        const getRecentStoryRange = () => {
-            const upper = text.indexOf(boundary.upper);
-            if (upper === -1) {
-                return null;
-            }
-            const start = upper + boundary.upper.length;
-            const markedEnd = text.indexOf(boundary.end, start);
-            return {
-                upper,
-                start,
-                end: markedEnd === -1 ? text.length : markedEnd
-            };
-        };
-
-        if (config.debug) {
-            const range = getRecentStoryRange();
-            if (range !== null) {
-                const cleanedStory = text
-                    .slice(range.start, range.end)
-                    .replace(/\s*\([\s\S]*?\)\s*/g, "\n\n");
-                text = (
-                    text.slice(0, range.start)
-                    + cleanedStory
-                    + text.slice(range.end)
-                );
+        const n = possibilities.length;
+        const total = (n * (n + 1)) / 2;
+        for (let [i, r] = [0, Math.random() * total]; i < n; i++) {
+            r -= (n - i);
+            if (r < 0) {
+                IS.agent = possibilities[i];
+                break;
             }
         }
-        // Construct the agent instance for the triggered NPC
+
         const agent = new Agent(IS.agent, { percent: config.percent, indicator: config.indicator });
-        // Whitelist of thought labels allowed in this context
         const whitelist = new Set();
-        /**
-         * Builds the mind array from the agent's brain
-         * Sorts thoughts and prepares them for context injection
-         * @returns {Array} An array of [label, key, thought] triplets
-         */
+
         const mind = (() => {
-            // Sort direction: ascending (70%) or descending (30%)
-            // Keeps things fresh and prevents bias toward recent or old thoughts
             const direction = (Math.random() < 0.7) ? 1 : -1;
             const brain = agent.brain;
-            // Separate thoughts into numbered and unlabeled
             const unknowns = [];
             const numbered = [];
-            // Parse each thought and extract label/content
             for (const key in brain) {
                 const value = brain[key];
-                // Clear from brain (keep instantaneous memory use low)
                 delete brain[key];
-                // Arrow separates label from thought content
                 const sliceIndex = value.indexOf("→");
                 const unknown = "*";
-                // Parse label and thought, handle malformed values
                 const [label, thought] = (sliceIndex === -1) ? [unknown, value.trim()] : [
                     parseInt(value.slice(0, sliceIndex), 10) || unknown,
                     value.slice(sliceIndex + 1).trim()
                 ];
                 const triplet = [label, key, thought];
                 if (!Number.isInteger(label)) {
-                    // No valid label, insert at random position in unknowns
                     unknowns.splice(Math.floor(Math.random() * (unknowns.length + 1)), 0, triplet);
                     continue;
                 }
-                // Track valid labels for the whitelist
                 whitelist.add(label);
-                // Insert in sorted order (ascending or descending)
                 let i = numbered.length;
                 while (i-- && ((direction * label) < (direction * numbered[i][0])));
                 numbered.splice(i + 1, 0, triplet);
             }
-            // Teehee
             agent.lobotomize();
             if (unknowns.length === 0) {
-                // All thoughts have labels, nice and clean UwU
                 return numbered;
             }
-            // Thoughts without integer labels ("[*]") are placed above (60%) or below (40%) the rest
             return (Math.random() < 0.6) ? [...unknowns, ...numbered] : [...numbered, ...unknowns];
         })();
-        // Process context and decode any embedded thought labels
-        // Zero-width chars encode thought labels that link story events to brain contents
-        text = text.replace((
-            // Normalize spacing around zero-width chars
-            /\s*[\u200B-\u200D][\s\u200B-\u200D]*/g
-        ), z => `\n\n${z.replace(/\s+/g, "")}`).replace((
-            // Decode binary-encoded thought labels
-            /\u200B*((?:[\u200C\u200D]+\u200B+)*[\u200C\u200D]+)\u200B*/g
-        ), (_, encoded) => {
-            let n = 0;
-            let bits = false;
-            let decoded = "";
-            // Parse binary encoding: ZWSP = separator, ZWNJ = 0, ZWJ = 1
-            for (let i = 0; i <= encoded.length; i++) {
-                const c = encoded.charCodeAt(i);
-                if ((c === 0x200C) || (c === 0x200D)) {
-                    // Accumulate bits
-                    n = (n << 1) | (c === 0x200D);
-                    bits = true;
-                } else if (bits) {
-                    // End of a number, check if it's in the whitelist
-                    bits = false;
-                    if (whitelist.has(n)) {
-                        // This thought label is visible to the story model in context
-                        decoded += `[${n}]`;
-                    }
-                    n = 0;
-                }
-            }
-            return (decoded === "") ? "" : `${decoded}\n\n`;
-        }).replace(/[\u200B-\u200D]+/g, "");
-        /**
-         * Generates possessive form of a name
-         * Handles names ending in s or already possessive
-         * @param {string} name - The name to make possessive
-         * @returns {string} Possessive form (e.g., "Iris'" or "Leah's")
-         */
+
         const ownership = (name = "") => `${name}${(
             (name.endsWith("'") || name.endsWith("'s"))
             ? "" : name.toLowerCase().endsWith("s")
             ? "'" : "'s"
         )}`;
-        // Point of view string for prompt templates
+
         const pov = ["first", "second", "third"][config.pov - 1] ?? "second";
-        /**
-         * Generates a simple PoV directive for non-task turns
-         * @returns {string} System prompt for PoV guidance
-         */
         const nondirective = () => (
             `<SYSTEM>\n# Always continue the story from ${ownership(config.player)} ${pov} person perspective.\n</SYSTEM>`
         );
-        /**
-         * Wraps the agent's thoughts into a context-friendly format
-         * Also clears the mind array as a side effect
-         * @param {string} joined - Pre-joined thought strings
-         * @returns {string} Formatted brain context block
-         */
-        const bindSelf = (joined = "") => ((mind.length = 0) || (joined === "")) ? "\n\n" : (
-            `\n\n# ${ownership(agent.name)} brain and inner self: [\n${joined}\n]\n\n`
-        );
-        // Check if the current turn is a retry or erase + continue following a previous task completion
-        if (IS.hash === historyHash()) {
-            // Same history, just inject the contextualized brain without a new task
-            text = `${text.trimEnd()}\n\n${nondirective()}${bindSelf(mind
-                .map(([label, key, thought]) => `- ${key}: ${thought} [${label}]`)
-                .join("\n")
-            )} `;
-        } else {
-            // Prepare for a possible task request
-            IS.encoding = "";
-            /**
-             * Build the brain context and determine if constrained
-             * Being constrained means the agent's brain is too large relative to the story context
-             */
-            /**
-             * Persists the current flat brain object back into the Brain card notes.
-             * Matches Inner Self's existing JSON/simple display formats.
-             * @param {Object} brain - Parsed brain object
-             * @returns {void}
-             */
-            const persistBrain = (brain = {}) => {
-                const keys = Object.keys(brain);
-                if (keys.length === 0) {
-                    agent.card.description = "{}";
-                    return;
-                }
-                if (config.json) {
-                    agent.card.description = keys.map(key => (
-                        `"${key}": ${JSON.stringify(brain[key])}`
-                    )).join(",\n\n");
-                    return;
-                }
-                agent.card.description = keys.map(key => (
-                    `${key}: ${brain[key]}`
-                )).join("\n\n");
-                return;
-            };
-            /**
-             * FIFO pruning: delete exactly one oldest numbered thought.
-             * Unnumbered/manual thoughts are intentionally protected.
-             * Retry-safe: the same history state cannot prune twice.
-             * @returns {boolean} true when a thought was deleted
-             */
-            const pruneOldestThought = () => {
-                const hash = historyHash();
-                if (IS.fifoHash === hash) {
-                    return false;
-                }
-                let oldest = null;
-                for (const [label, key] of mind) {
-                    if (
-                        Number.isInteger(label)
-                        && (
-                            (oldest === null)
-                            || (label < oldest.label)
-                        )
-                    ) {
-                        oldest = { label, key };
-                    }
-                }
-                if (oldest === null) {
-                    log(`Inner Self FIFO: ${agent.name}'s brain is full, but no numbered thoughts can be pruned.`);
-                    return false;
-                }
-                const brain = agent.brain;
-                if (!(oldest.key in brain)) {
-                    return false;
-                }
-                delete brain[oldest.key];
-                persistBrain(brain);
-                IS.fifoHash = hash;
-                IS.ops++;
-                whitelist.delete(oldest.label);
-                const index = mind.findIndex(([, key]) => key === oldest.key);
-                if (index !== -1) {
-                    mind.splice(index, 1);
-                }
-                log(
-                    `Inner Self FIFO: deleted ${agent.name}.${oldest.key} `
-                    + `[${oldest.label}] as the oldest thought.`
-                );
-                return true;
-            };
 
-            const [self, full] = (() => {
-                /**
-                 * Joins the mind array into a formatted string
-                 * @param {boolean} unlabeled - Omit labels if true
-                 * @returns {string} Formatted thoughts
-                 */
-                const joinMind = (unlabeled = false) => mind.map(([label, key, thought]) => (
-                    `${unlabeled ? "" : `[${label}] `}(${key}: \`${thought}\`)`
-                )).join("\n");
-                let joined = joinMind();
-                // Check if brain exceeds the allowed percentage of context.
-                // Only applies when the formatted brain is at least 800 chars.
-                const constrained = ((800 < joined.length) && (
-                    ((agent.metadata.percent / 100) * (
-                        text.length - text.indexOf(boundary.upper) + boundary.upper.length
-                    )) < joined.length
-                ));
-                if (constrained) {
-                    // Delete one oldest numbered thought locally instead of
-                    // asking the model to choose a deletion.
-                    pruneOldestThought();
-                    joined = joinMind();
-                }
-                return [bindSelf(joined), constrained];
-            })();
-            /**
-             * Occasionally adds a self-reflection prompt to thoughts
-             * Keeps the agent from being too present-focused
-             * But they become insufferable if always applicable
-             * @param {boolean} fancy - Use fancier wording if true
-             * @returns {string} Refocus instruction or empty string
-             */
-            const refocus = (fancy = false) => (Math.random() < 0.2) ? (
-                `\n  - Never focus on the present, instead focus ${ownership(agent.name)} thought on self-reflection or ${fancy ? "an actionable future plan." : "future plans"}`
-            ) : "";
-            /**
-             * Prompt templates for different task types and PoV combinations
-             * Wrapped in a Proxy for auto-trimming and nested access because it's pretty :3
-             * @type {Object}
-             */
+        // In the KV layout Recent Story ends when a later cache section begins.
+        const recentStoryLength = (() => {
+            const needle = "Recent Story:";
+            const header = cacheBase.indexOf(needle);
+            if (header === -1) {
+                return cacheBase.length;
+            }
+            const start = header + needle.length;
+            const tail = cacheBase.slice(start);
+            const match = tail.match(/\n(?:Memories:|World Lore:|\[\s*Author's\s*note\s*:)/i);
+            return match ? match.index : tail.length;
+        })();
+
+        const refocus = (fancy = false) => (Math.random() < 0.2) ? (
+            `\n  - Never focus on the present, instead focus ${ownership(agent.name)} thought on self-reflection or ${fancy ? "an actionable future plan." : "future plans"}`
+        ) : "";
             const prompt = new Proxy({
                 // Operating environment prompts (one per PoV)
                 directive: {
@@ -2119,84 +1836,110 @@ Follow the format **perfectly**.
                 // Primitives pass through
                 : t[p]
             ); } });
-            // Keep AI Dungeon's existing context first. Dynamic Inner Self material
-            // is appended so Optimized Context can reuse the stable prefix.
-            text = full ? (
-                // Brain is full. FIFO already pruned one oldest thought locally.
-                // Spend this turn on normal story continuation; next turn will
-                // prune again if still full, or resume thought formation.
-                `${text.trimEnd()}\n\n${nondirective()}${self} `
-            ) : ((config.chance / ((config.half && [
-                // config.half -> reduce task chance after Do/Say/Story actions (player is driving)
-                "do", "say", "story"
-            ].includes(getPrevAction()?.type)) ? 200 : 100)) < Math.random()) ? (
-                // Sometimes do nothing and emit a side effect on IS.agent
-                (IS.agent = " "),
-                `${text.trimEnd()}\n\n${nondirective()}${self} `
-            ) : `${text.trimEnd()}\n\n${prompt.directive[pov]}${self}${boundary.lower}${(
-                // Low context = simple prompt, high context = advanced prompt
-                (limit < 20000) ? prompt.assign[pov] : prompt.choice[pov]
-            )}\n\n`;
-        }
-        // ==================== CONTEXT TRUNCATION ====================
-        // Three-phase truncation to fit within AID's context limit
-        truncate: {
-            // Precalculate how much needs to be trimmed
-            let excess = text.length - limit;
-            if (excess < 1) {
-                // Under the limit, no truncation required
-                break truncate;
-            }
-            // Find the real Recent Story range. Optimized Context may place
-            // Memories and World Lore after it.
-            const storyRange = getRecentStoryRange();
-            // Phase 1: Truncate only Recent Story.
-            if (storyRange !== null) {
-                const storyStart = storyRange.start;
-                const storyLength = storyRange.end - storyStart;
-                if (0 < storyLength) {
-                    const remove = Math.min(
-                        // Never remove more than 85% of recent story context
-                        Math.floor(storyLength * 0.85),
-                        // Keep at least 2000 chars of recent story context
-                        Math.max(0, storyLength - 2000),
-                        // But don't remove more than needed
-                        excess
-                    );
-                    if (0 < remove) {
-                        text = `${text.slice(0, storyStart)}${text.slice(storyStart + remove)}`;
-                        excess -= remove;
-                    }
+
+            const baseMindLines = mind.map(([label, key, thought]) => (
+                `[${label}] (${key}: \`${thought}\`)`
+            ));
+            const joinedLength = baseMindLines.join("\n").length;
+            const constrained = (
+                (800 < joinedLength)
+                && (((agent.metadata.percent / 100) * recentStoryLength) < joinedLength)
+            );
+
+            if (constrained && (Math.random() >= 0.4)) {
+                for (let i = baseMindLines.length - 1; 0 < i; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [baseMindLines[i], baseMindLines[j]] = [baseMindLines[j], baseMindLines[i]];
                 }
             }
-            if (excess < 1) {
-                // Phase 1 was enough
-                break truncate;
+
+            const makeBrain = (lines = []) => (lines.length === 0) ? "" : (
+                `\n\n# ${ownership(agent.name)} brain and inner self: [\n${lines.join("\n")}\n]`
+            );
+
+            const makeSuffix = (head = "", lines = [], tail = "") => {
+                let out = "\n\n" + head + makeBrain(lines);
+                if (tail !== "") {
+                    out += "\n\n" + tail;
+                }
+                return out + "\n\n";
+            };
+
+            // Keep complete thoughts; never cut the base context and never cut a task prompt.
+            const fitSuffix = (head = "", lines = [], tail = "") => {
+                if (suffixBudget < 1) {
+                    return "";
+                }
+                const selected = [];
+                let out = makeSuffix(head, selected, tail);
+                if (suffixBudget < out.length) {
+                    return "";
+                }
+                for (const line of lines) {
+                    const candidate = makeSuffix(head, [...selected, line], tail);
+                    if (suffixBudget < candidate.length) {
+                        break;
+                    }
+                    selected.push(line);
+                    out = candidate;
+                }
+                return out;
+            };
+
+            const retry = (IS.hash === historyHash());
+            let head = "";
+            let tail = "";
+            let expectsTask = false;
+
+            if (retry) {
+                head = nondirective();
+                IS.agent = " ";
+            } else {
+                IS.encoding = "";
+                const reducedChance = config.chance / ((config.half && [
+                    "do", "say", "story"
+                ].includes(getPrevAction()?.type)) ? 200 : 100);
+
+                if (constrained) {
+                    head = prompt.directive[pov];
+                    tail = prompt.forget[pov];
+                    expectsTask = true;
+                } else if (reducedChance < Math.random()) {
+                    head = nondirective();
+                    IS.agent = " ";
+                } else {
+                    head = prompt.directive[pov];
+                    tail = (maxChars < 20000) ? prompt.assign[pov] : prompt.choice[pov];
+                    expectsTask = true;
+                }
             }
-            // Phase 2: Truncate above the recent story
-            // Between the start and boundary.upper
-            // Remove from right to left
-            const newUpperIndex = text.indexOf(boundary.upper);
-            if (0 < newUpperIndex) {
-                const remove = Math.min(excess, newUpperIndex);
-                text = `${text.slice(0, newUpperIndex - remove)}${text.slice(newUpperIndex)}`;
-                excess -= remove;
+
+            let dynamicSuffix = fitSuffix(head, baseMindLines, tail);
+
+            if ((dynamicSuffix === "") && expectsTask) {
+                // Not enough suffix room for a complete operation prompt. Cancel the task
+                // rather than submit a partial instruction that Output could misinterpret.
+                IS.agent = " ";
+                IS.encoding = "";
+                dynamicSuffix = fitSuffix(nondirective(), baseMindLines, "");
             }
-            if (excess < 1) {
-                // Phase 2 was enough
-                break truncate;
+
+            if (dynamicSuffix === "") {
+                IS.agent = " ";
+                IS.encoding = "";
+                text = innerBase || " ";
+                return;
             }
-            // Phase 3: I don't care anymore, just make it fit
-            // Remove from left to right as a final fallback
-            // (I've never seen this situation happen before, but I guard it anyway)
-            text = text.slice(text.length - limit);
-        }
-        // Replace transient boundary markers with proper formatting
-        setMarker(boundary.upper, `\n\n${boundary.needle}\n`);
-        setMarker(boundary.end, "\n\n");
-        setMarker(boundary.lower, "\n\n");
-        text = text.trimStart() || " ";
-        return;
+
+            text = innerBase + dynamicSuffix;
+
+            // Hard invariant required by AID cache-compatible V1 context scripts.
+            if (!text.startsWith(cacheBase)) {
+                IS.agent = " ";
+                IS.encoding = "";
+                text = cacheBase || " ";
+            }
+            return;
     } else if (hook === "input") {
         // ==================== INPUT HOOK ====================
         // Check for /AC command to force-enable Auto-Cards
@@ -3616,20 +3359,22 @@ function AutoCards(inHook, inText, inStop) {
                     })
                     // Remove dumb memories from the context window
                     // (Latitude, if you're reading this, please give us memoryBank read/write access 😭)
-                    .replace(/(Memories:)\s*([\s\S]*?)\s*(Recent Story:|$)/i, (_, left, memories, right) => {
-                        return (left + "\n" + (memories
-                            .split("\n")
-                            .filter(memory => {
-                                const lowerMemory = memory.toLowerCase();
-                                return !(
-                                    (lowerMemory.includes("select") && lowerMemory.includes("continue"))
-                                    || lowerMemory.includes(">>>") || lowerMemory.includes("<<<")
-                                    || lowerMemory.includes("lsiv2")
-                                );
-                            })
-                            .join("\n")
-                        ) + (right !== "") ? ("\n\n" + right) : "");
-                    })
+                    .replace(
+                        /(Memories:)\s*([\s\S]*?)(?=\s*(?:Recent Story:|World Lore:|\[\s*Author's\s*note\s*:|$))/i,
+                        (_, left, memories) => (
+                            left + "\n" + memories
+                                .split("\n")
+                                .filter(memory => {
+                                    const lowerMemory = memory.toLowerCase();
+                                    return !(
+                                        (lowerMemory.includes("select") && lowerMemory.includes("continue"))
+                                        || lowerMemory.includes(">>>") || lowerMemory.includes("<<<")
+                                        || lowerMemory.includes("lsiv2")
+                                    );
+                                })
+                                .join("\n")
+                        )
+                    )
                     // Remove various Auto-Cards messages
                     .replace(/(?:\s*>>>[\s\S]*?<<<\s*)+/g, "\n\n")
                 );
@@ -5294,23 +5039,31 @@ function AutoCards(inHook, inText, inStop) {
                     AC.database.memories.associations[titleKey][0]--;
                 }
             }
-            // This copy of TEXT may be mutated
+            // This copy of TEXT may be mutated internally. In KV mode the final
+            // returned context is rebuilt as the exact original TEXT plus an appended suffix.
             let context = TEXT;
-
-            // Transient KV adapter outputs. Auto-Cards keeps all of its original
-            // internal behavior; the Context wrapper only uses these to relocate
-            // dynamic model-facing material after AI Dungeon's stable prefix.
-            state.InnerSelf ??= {};
-            state.InnerSelf.AC ??= {};
-            state.InnerSelf.AC.kvMemorySuffix = "";
-            state.InnerSelf.AC.kvTaskSuffix = "";
-
+            const kvMode = (
+                (HOOK === "context")
+                && ((state.InnerSelf?.kv?.version ?? 0) >= 3)
+            );
+            const kvBase = TEXT;
+            const kvMaxChars = Number.isInteger(info?.maxChars) ? info.maxChars : kvBase.length;
+            const kvRoom = Math.max(0, kvMaxChars - kvBase.length - 16);
+            let kvTaskSuffix = "";
+            const kvMemorySuffixes = [];
+            if (kvMode) {
+                state.InnerSelf ??= {};
+                state.InnerSelf.AC ??= {};
+                state.InnerSelf.AC.kvDeferred = false;
+            }
             const titleHeaderPatternGlobal = /\s*{\s*titles?\s*:\s*([\s\S]*?)\s*}\s*/gi;
             // Card events govern the parsing of memories from raw context as well as card memory bank injection
             const cardEvents = (function() {
                 // Extract memories from the initial text (not TEXT as called from within the context modifier!)
                 const contextMemories = (function() {
-                    const memoriesMatch = text.match(/Memories\s*:\s*([\s\S]*?)\s*(?:Recent\s*Story\s*:|$)/i);
+                    const memoriesMatch = text.match(
+                        /Memories\s*:\s*([\s\S]*?)(?=\s*(?:Recent\s*Story\s*:|World\s*Lore\s*:|\[\s*Author's\s*note\s*:|$))/i
+                    );
                     if (!memoriesMatch) {
                         return new Set();
                     }
@@ -5468,7 +5221,13 @@ function AutoCards(inHook, inText, inStop) {
                             // This card contains no card memories to contextualize
                             context = context.replace(cardEvent.titleHeader, "\n\n");
                         } else {
-                            // Insert card memories within context and ensure they occur uniquely
+                            // Insert card memories within the legacy working copy. KV mode
+                            // also records them for a separate append-only suffix.
+                            if (kvMode) {
+                                kvMemorySuffixes.push(
+                                    `# Auto-Cards memory for ${card.title}:\n${cardMemoriesText}`
+                                );
+                            }
                             const cardMemories = cardMemoriesText.split("\n").map(cardMemory => cardMemory.trim());
                             for (const cardMemory of cardMemories) {
                                 if (25 < cardMemory.length) {
@@ -5585,7 +5344,7 @@ function AutoCards(inHook, inText, inStop) {
                 .replace(/(\s*<#>\s*)+/g, "\n")
                 .replace(titleHeaderPatternGlobal, "\n\n")
                 .replace(/World\s*Lore\s*:\s*/i, "World Lore:\n")
-                .replace(/Memories\s*:\s*(?=Recent\s*Story\s*:|$)/i, "")
+                .replace(/Memories\s*:\s*(?=Recent\s*Story\s*:|World\s*Lore\s*:|\[\s*Author\'s\s*note\s*:|$)/i, "")
             );
             // Prompt the AI to generate a new card entry, compress an existing card's memories, or continue the story
             let isGenerating = false;
@@ -5672,7 +5431,7 @@ function AutoCards(inHook, inText, inStop) {
             }
             if (shouldTrimContext()) {
                 // Truncate context based on AC.signal.maxChars, begin by individually removing the oldest sentences from the recent story portion of the context window
-                const recentStoryPattern = /Recent\s*Story\s*:\s*([\s\S]*?)(%@GEN@%|%@COM@%|\s\[\s*Author's\s*note\s*:|$)/i;
+                const recentStoryPattern = /Recent\s*Story\s*:\s*([\s\S]*?)(%@GEN@%|%@COM@%|\s*Memories\s*:|\s*World\s*Lore\s*:|\s*\[\s*Author's\s*note\s*:|$)/i;
                 const recentStoryMatch = context.match(recentStoryPattern);
                 if (recentStoryMatch) {
                     const recentStory = recentStoryMatch[1];
@@ -5720,30 +5479,7 @@ function AutoCards(inHook, inText, inStop) {
                 }
             }
             if (isRemembering) {
-                // Capture the same active Auto-Card memories before replacing their
-                // internal markers. The KV Context wrapper appends this bounded suffix
-                // instead of rewriting Story Card text inside the stable prefix.
-                const memoryBlocks = [];
-                const memoryPattern = /{%@MEM@%([\s\S]*?)%@MEM@%}/g;
-                let memoryMatch;
-                while ((memoryMatch = memoryPattern.exec(context)) !== null) {
-                    const memoryText = memoryMatch[1].trim();
-                    if (memoryText !== "") {
-                        memoryBlocks.push(memoryText);
-                    }
-                }
-                if (memoryBlocks.length > 0) {
-                    const memoryBudget = Math.max(
-                        800,
-                        Math.min(6000, Math.floor((info.maxChars || 12000) * 0.15))
-                    );
-                    state.InnerSelf.AC.kvMemorySuffix = (
-                        "\n\n# Auto-Cards relevant memories:\n" +
-                        memoryBlocks.join("\n")
-                    ).slice(0, memoryBudget);
-                }
-
-                // Card memory flags serve no further purpose internally.
+                // Card memory flags serve no further purpose
                 context = (context
                     // Case-insensitivity is crucial here
                     .replace(/(?<={%@MEM@%)\s*/gi, "")
@@ -5757,29 +5493,58 @@ function AutoCards(inHook, inText, inStop) {
                 state.InnerSelf ??= {};
                 state.InnerSelf.AC ??= {};
                 state.InnerSelf.AC.event = true;
-
-                const taskMarker = isGenerating ? "%@GEN@%" : "%@COM@%";
-                const taskIndex = context.lastIndexOf(taskMarker);
-                if (taskIndex !== -1) {
-                    // The original Auto-Cards parser/state machine is untouched.
-                    // Only relocate its original prompt after the stable cached prefix.
-                    const taskBudget = Math.max(
-                        1600,
-                        Math.min(10000, Math.floor((info.maxChars || 12000) * 0.35))
-                    );
-                    state.InnerSelf.AC.kvTaskSuffix = (
-                        "\n\n" + context.slice(taskIndex + taskMarker.length).trimStart()
-                    ).slice(0, taskBudget);
-                }
-
                 if (isGenerating) {
-                    // Likewise for the card entry generation delimiter
                     context = context.replaceAll("%@GEN@%", "");
                 } else {
-                    // Or the (mutually exclusive) card memory compression delimiter
                     context = context.replaceAll("%@COM@%", "");
                 }
             }
+
+            if (kvMode) {
+                const memoryBlocks = [...new Set(kvMemorySuffixes)]
+                    .map(block => "\n\n" + block.trim() + "\n\n");
+                let suffix = "";
+                const taskActive = (isGenerating || isCompressing);
+
+                if (taskActive) {
+                    // A complete task is mandatory. Never let AID receive a clipped
+                    // generation/compression instruction.
+                    if ((kvTaskSuffix === "") || (kvRoom < kvTaskSuffix.length)) {
+                        state.InnerSelf.AC.event = false;
+                        state.InnerSelf.AC.kvDeferred = true;
+                    } else {
+                        let remaining = kvRoom - kvTaskSuffix.length;
+                        const selectedMemories = [];
+                        for (const block of memoryBlocks) {
+                            if (remaining < block.length) {
+                                break;
+                            }
+                            selectedMemories.push(block);
+                            remaining -= block.length;
+                        }
+                        suffix = selectedMemories.join("") + kvTaskSuffix;
+                    }
+                } else {
+                    let remaining = kvRoom;
+                    const selectedMemories = [];
+                    for (const block of memoryBlocks) {
+                        if (remaining < block.length) {
+                            break;
+                        }
+                        selectedMemories.push(block);
+                        remaining -= block.length;
+                    }
+                    suffix = selectedMemories.join("");
+                }
+
+                context = kvBase + suffix;
+                if (!context.startsWith(kvBase)) {
+                    state.InnerSelf.AC.event = false;
+                    state.InnerSelf.AC.kvDeferred = true;
+                    context = kvBase;
+                }
+            }
+
             CODOMAIN.initialize(context);
             function isolateMemories(memoriesText) {
                 return (memoriesText
@@ -5812,15 +5577,15 @@ function AutoCards(inHook, inText, inStop) {
                     return entryLines.join("");
                 })();
                 if (cardEntryText === null) {
-                    // Safety measure
                     resetCompressionProperties();
                     return;
                 }
                 repositionAN();
-                // The "%COM%" substring serves as a temporary delimiter for later context length trucation
-                context = context.trimEnd() + "\n\n" + cardEntryText + (
+
+                const compressionSource = cardEntryText + (
                     [...AC.compression.newMemoryBank, ...AC.compression.oldMemoryBank].join(" ")
-                ) + "%@COM@%\n\n" + (function() {
+                );
+                const compressionInstruction = (function() {
                     const memoryConstruct = (function() {
                         if (AC.compression.lastConstructIndex === -1) {
                             for (let i = 0; i < AC.compression.oldMemoryBank.length; i++) {
@@ -5833,43 +5598,51 @@ function AutoCards(inHook, inText, inStop) {
                                 }
                             }
                         } else {
-                            // The previous card memory compression attempt produced a bad output
                             AC.compression.lastConstructIndex = boundInteger(
                                 0, AC.compression.lastConstructIndex + 1, AC.compression.oldMemoryBank.length - 1
                             );
                         }
                         return buildMemoryConstruct();
                     })();
-                    // Fill all %{title} placeholders
-                    const precursorPrompt = insertTitle(AC.config.compressionPrompt, AC.compression.vanityTitle).trim();
+                    const precursorPrompt = insertTitle(
+                        AC.config.compressionPrompt,
+                        AC.compression.vanityTitle
+                    ).trim();
                     const memoryPlaceholderPattern = /(?:[%\$]+\s*|[%\$]*){+\s*memor(y|ies)\s*}+/gi;
                     if (memoryPlaceholderPattern.test(precursorPrompt)) {
-                        // Fill all %{memory} placeholders with a selection of pending old memories
                         return precursorPrompt.replace(memoryPlaceholderPattern, memoryConstruct);
                     } else {
-                        // Append the partial entry to the end of context
                         return precursorPrompt + "\n\n" + memoryConstruct;
                     }
-                })() + "\n\n";
+                })();
+
+                kvTaskSuffix = (
+                    "\n\n" + compressionSource.trim() + "\n\n"
+                    + compressionInstruction.trim() + "\n\n"
+                );
+                context = (
+                    context.trimEnd() + "\n\n" + compressionSource
+                    + "%@COM@%\n\n" + compressionInstruction + "\n\n"
+                );
                 isCompressing = true;
                 return;
             }
             function promptGeneration() {
                 repositionAN();
-                // All %{title} placeholders were already filled during this workpiece's initialization
-                // The "%GEN%" substring serves as a temporary delimiter for later context length trucation
-                context = context.trimEnd() + "%@GEN@%\n\n" + (function() {
-                    // For context only, remove the title header from this workpiece's partially completed entry
+                // Build the generation task once so KV mode can append exactly that task
+                // after the immutable cached prompt.
+                const generationTask = (function() {
                     const partialEntry = formatEntry(AC.generation.workpiece.entry);
                     const entryPlaceholderPattern = /(?:[%\$]+\s*|[%\$]*){+\s*entry\s*}+/gi;
                     if (entryPlaceholderPattern.test(AC.generation.workpiece.prompt)) {
-                        // Fill all %{entry} placeholders with the partial entry
                         return AC.generation.workpiece.prompt.replace(entryPlaceholderPattern, partialEntry);
                     } else {
-                        // Append the partial entry to the end of context
                         return AC.generation.workpiece.prompt.trimEnd() + "\n\n" + partialEntry;
                     }
                 })();
+                kvTaskSuffix = "\n\n" + generationTask.trim() + "\n\n";
+                // Keep the legacy working copy intact for Auto-Cards' internal bookkeeping.
+                context = context.trimEnd() + "%@GEN@%\n\n" + generationTask;
                 isGenerating = true;
                 return;
             }
