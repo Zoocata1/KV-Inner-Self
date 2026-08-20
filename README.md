@@ -24,26 +24,11 @@ Current Full Release
 8. Copy and paste the following code into your empty `Input` tab:
 ```javascript
 // Your "Input" tab should look like this
+InnerSelf("input");
 const modifier = (text) => {
-  const originalText =
-    (typeof text === "string" && text !== "") ? text : " "
-
-  try {
-    globalThis.text = originalText
-    InnerSelf("input")
-
-    const out = globalThis.text
-    return {
-      text: (typeof out === "string" && out !== "")
-        ? out
-        : originalText
-    }
-  } catch (e) {
-    log("Inner Self input error:", e)
-    return { text: originalText }
-  }
-}
-
+  // Any other input modifier scripts can go here
+  return { text };
+};
 modifier(text)
 ```
 9. Select the `Context` tab on the left
@@ -51,87 +36,34 @@ modifier(text)
 11. Copy and paste the following code into your empty `Context` tab:
 ```javascript
 // @cache-compatible
+const __innerSelfKVBase = text;
+
+try {
+  InnerSelf("context");
+
+  // Cache-compatible V1 context scripts may only append to the exact incoming context.
+  if ((typeof text !== "string") || !text.startsWith(__innerSelfKVBase)) {
+    log("Inner Self KV: rejected a non-append-only context mutation.");
+    text = __innerSelfKVBase || " ";
+  }
+} catch (e) {
+  log("Inner Self KV context error:", e);
+  text = __innerSelfKVBase || " ";
+}
+
 const modifier = (text) => {
-  const originalText =
-    (typeof text === "string" && text !== "") ? text : " "
-
   try {
-    globalThis.text = originalText
-    globalThis.stop ??= false
+    const safeText = (typeof text === "string" && text.length > 0)
+      ? text
+      : (__innerSelfKVBase || " ");
 
-    // Delete the temporary Auto-Cards text we saved last turn so it doesn’t accidentally get reused.
-    if (state.InnerSelf?.AC) {
-      state.InnerSelf.AC.kvMemorySuffix = ""
-      state.InnerSelf.AC.kvTaskSuffix = ""
+    if (typeof stop === "boolean") {
+      return { text: safeText, stop };
     }
-
-    InnerSelf("context")
-
-    const changedText = globalThis.text
-    const ac = state.InnerSelf?.AC || {}
-    const memorySuffix =
-      (typeof ac.kvMemorySuffix === "string")
-        ? ac.kvMemorySuffix
-        : ""
-    const taskSuffix =
-      (typeof ac.kvTaskSuffix === "string")
-        ? ac.kvTaskSuffix
-        : ""
-
-    // Auto-Cards is currently creating or compressing a card.
-    if (ac.event === true && taskSuffix !== "") {
-      const out = `${originalText}${taskSuffix}`
-      return globalThis.stop === true
-        ? { text: out, stop: true }
-        : { text: out }
-    }
-
-    if (
-      typeof changedText !== "string" ||
-      changedText === ""
-    ) {
-      const out = `${originalText}${memorySuffix}`
-      return globalThis.stop === true
-        ? { text: out, stop: true }
-        : { text: out }
-    }
-
-    // If Inner Self already gave us KV-safe context, don’t mess with it.
-    if (changedText.startsWith(originalText)) {
-      return globalThis.stop === true
-        ? { text: changedText, stop: true }
-        : { text: changedText }
-    }
-
-    // Inner Self temporarily edits the context while figuring things out, then throw away Inner Self’s temporary edits
-    const anchors = [
-      "<SYSTEM>\n# OPERATING ENVIRONMENT",
-      "<SYSTEM>\n# Always continue the story"
-    ]
-
-    let suffixStart = -1
-    for (const anchor of anchors) {
-      const index = changedText.lastIndexOf(anchor)
-      if (index > suffixStart) {
-        suffixStart = index
-      }
-    }
-
-    const innerSuffix = (
-      suffixStart === -1
-        ? ""
-        : `\n\n${changedText.slice(suffixStart).trimStart()}`
-    )
-
-    const out =
-      `${originalText}${memorySuffix}${innerSuffix}`
-
-    return globalThis.stop === true
-      ? { text: out, stop: true }
-      : { text: out }
+    return { text: safeText };
   } catch (e) {
-    log("Inner Self KV context error:", e)
-    return { text: originalText }
+    log("Inner Self KV modifier error:", e);
+    return { text: __innerSelfKVBase || " " };
   }
 }
 
@@ -142,26 +74,11 @@ modifier(text)
 14. Copy and paste the following code into your empty `Output` tab:
 ```javascript
 // Your "Output" tab should look like this
+InnerSelf("output");
 const modifier = (text) => {
-  const originalText =
-    (typeof text === "string" && text !== "") ? text : " "
-
-  try {
-    globalThis.text = originalText
-    InnerSelf("output")
-
-    const out = globalThis.text
-    return {
-      text: (typeof out === "string" && out !== "")
-        ? out
-        : originalText
-    }
-  } catch (e) {
-    log("Inner Self output error:", e)
-    return { text: originalText }
-  }
-}
-
+  // Any other output modifier scripts can go here
+  return { text };
+};
 modifier(text)
 ```
 15. Select the `Library` tab on the left
