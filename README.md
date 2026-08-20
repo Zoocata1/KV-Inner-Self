@@ -1,4 +1,4 @@
-<img width="220" height="294" alt="cute-anime" src="https://github.com/user-attachments/assets/242580f2-f12a-4355-899a-9bc09afd301a" />
+<img width="660" height="294" alt="cute-anime" src="https://github.com/user-attachments/assets/242580f2-f12a-4355-899a-9bc09afd301a" />
 
 
 # INNER SELF FOR OPTIMIZED CONTEXT
