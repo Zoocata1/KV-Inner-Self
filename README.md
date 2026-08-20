@@ -1,4 +1,6 @@
 <img width="220" height="294" alt="cute-anime" src="https://github.com/user-attachments/assets/242580f2-f12a-4355-899a-9bc09afd301a" />
+
+
 # INNER SELF FOR OPTIMIZED CONTEXT
 
 This Github Repo serves as the goto for the amazing Inner Self script, Created by LewdLeah, on AI Dungeons that has been modified to run on models using KV caching.
