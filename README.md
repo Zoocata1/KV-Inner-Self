@@ -45,37 +45,12 @@ modifier(text)
 11. Copy and paste the following code into your empty `Context` tab:
 ```javascript
 // @cache-compatible
-const __innerSelfKVBase = text;
-
-try {
-  InnerSelf("context");
-
-  // Cache-compatible V1 context scripts may only append to the exact incoming context.
-  if ((typeof text !== "string") || !text.startsWith(__innerSelfKVBase)) {
-    log("Inner Self KV: rejected a non-append-only context mutation.");
-    text = __innerSelfKVBase || " ";
-  }
-} catch (e) {
-  log("Inner Self KV context error:", e);
-  text = __innerSelfKVBase || " ";
-}
-
+// Your "Context" tab should look like this
+InnerSelf("context");
 const modifier = (text) => {
-  try {
-    const safeText = (typeof text === "string" && text.length > 0)
-      ? text
-      : (__innerSelfKVBase || " ");
-
-    if (typeof stop === "boolean") {
-      return { text: safeText, stop };
-    }
-    return { text: safeText };
-  } catch (e) {
-    log("Inner Self KV modifier error:", e);
-    return { text: __innerSelfKVBase || " " };
-  }
-}
-
+  // Any other context modifier scripts can go here
+  return { text, stop };
+};
 modifier(text)
 ```
 12. Select the `Output` tab on the left
